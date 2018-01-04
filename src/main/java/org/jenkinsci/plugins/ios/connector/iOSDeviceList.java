@@ -5,6 +5,7 @@ import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
 import com.sun.jna.Platform;
 import hudson.Extension;
+import hudson.Launcher;
 import hudson.Launcher.LocalLauncher;
 import hudson.model.Computer;
 import hudson.model.ModelObject;
@@ -21,13 +22,7 @@ import org.kohsuke.stapler.HttpResponse;
 import org.kohsuke.stapler.HttpResponses;
 import org.kohsuke.stapler.interceptor.RequirePOST;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintStream;
+import java.io.*;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +40,7 @@ import static hudson.util.jna.GNUCLibrary.*;
  * @author Kohsuke Kawaguchi
  */
 @Extension
-public class iOSDeviceList implements RootAction, ModelObject {
+public class iOSDeviceList implements RootAction, ModelObject, Serializable {
     private volatile Multimap<Computer,iOSDevice> devices = LinkedHashMultimap.create();
 
     /**
@@ -160,27 +155,44 @@ public class iOSDeviceList implements RootAction, ModelObject {
         }
 
         public List<iOSDevice> call() throws IOException {
+
             if (!Platform.isMac())
                 return Collections.emptyList();
 
+            int rerun = 3;
+            int count = 1;
             File exe = File.createTempFile("ios","list");
             try {
                 PrintStream logger = listener.getLogger();
                 logger.println("Listing up iOS Devices");
 
+
                 FileUtils.copyURLToFile(getClass().getResource("list"),exe);
                 LIBC.chmod(exe.getAbsolutePath(),0755);
+                while(count<rerun){
+                    ByteArrayOutputStream out = new ByteArrayOutputStream();
+                    int exit = new LocalLauncher(listener).launch().cmds(exe).stdout(out).stderr(logger).join();
+                    if (exit!=0) {
+                        logger.println(exe + " failed to execute:" + exit);
+                        logger.write(out.toByteArray());
+                        logger.println();
+                        new LocalLauncher(listener).launch()
+                                .cmds(new String[]{"sudo", "pkill", "usbmuxd"}).stderr(logger).join();
 
-                ByteArrayOutputStream out = new ByteArrayOutputStream();
-                int exit = new LocalLauncher(listener).launch().cmds(exe).stdout(out).stderr(logger).join();
-                if (exit!=0) {
-                    logger.println(exe + " failed to execute:" + exit);
-                    logger.write(out.toByteArray());
-                    logger.println();
-                    return Collections.emptyList();
+                        count += 1;
+                    }else{
+                        List<iOSDevice> r = parseOutput(logger, out);
+                        if(r.size()>0) {
+                            return r;
+                        }else{
+                            new LocalLauncher(listener).launch()
+                                    .cmds(new String[]{"sudo", "pkill", "usbmuxd"}).stderr(logger).join();
+                            count += 1;
+                        }
+                    }
                 }
-
-                return parseOutput(logger, out);
+                return Collections.emptyList();
+                //return parseOutput(logger, out);
             } catch (InterruptedException e) {
                 throw new IOException2("Interrupted while listing up devices",e);
             } finally {
